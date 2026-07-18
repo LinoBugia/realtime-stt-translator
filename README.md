@@ -24,7 +24,7 @@ Built with [FastAPI](https://fastapi.tiangolo.com/), powered by four interchange
 
 ---
 
-![UI screenshot](https://github.com/user-attachments/assets/4f4323e9-7cea-4cd3-a8c9-ad8b4d896147)
+![UI screenshot](Screenshot.png)
 
 ---
 
