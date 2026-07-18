@@ -5,11 +5,10 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg)](Dockerfile)
 
+
 Real-time speech-to-text and translation web application. Speak into a microphone, see transcription appear instantly, and get live translations into two target languages simultaneously.
 
 Built with [FastAPI](https://fastapi.tiangolo.com/), powered by four interchangeable STT engines, and designed to run anywhere -- locally, in Docker, or behind a reverse proxy.
-
-![UI screenshot](https://github.com/user-attachments/assets/4f4323e9-7cea-4cd3-a8c9-ad8b4d896147)
 
 ---
 
@@ -24,6 +23,11 @@ Built with [FastAPI](https://fastapi.tiangolo.com/), powered by four interchange
 > - **Setup**: `.env` anlegen (siehe [.env.example](.env.example)) und nur `ELEVENLABS_API_KEY` + `DEEPL_API_KEY` eintragen; empfohlene Engine für Live-Sprechen ist **ElevenLabs Scribe v2 Realtime** (Browser- oder Server-Mode). Start: `uvicorn app.main:app --port 8000`.
 
 ---
+
+![UI screenshot](https://github.com/user-attachments/assets/4f4323e9-7cea-4cd3-a8c9-ad8b4d896147)
+
+---
+
 
 ## Table of Contents
 
