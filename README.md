@@ -13,6 +13,18 @@ Built with [FastAPI](https://fastapi.tiangolo.com/), powered by four interchange
 
 ---
 
+> ### Änderungen (2026-07-18): DeepL-Integration (Live Speech Translator Auftrag von Lino Bugia)
+>
+> - **DeepL ist jetzt der bevorzugte Übersetzer**: Sobald `DEEPL_API_KEY` in `.env` gesetzt ist, laufen alle Übersetzungen (alle Engines, `/ws`, `/ws/deepgram`, `/ws/elevenlabs`) über die DeepL-API statt googletrans. Ohne Key bleibt googletrans als Fallback aktiv.
+> - **Neuer Endpoint `POST /api/translate`**: serverseitiger DeepL-Proxy (`{text, source_lang, target_lang, formality?, context?}`) — API-Keys bleiben ausschließlich im Backend.
+> - **Formality-Toggle** in den Settings (Default / Formal / Informal), wirksam für DE/ES/FR/PL/... u. a. (Englisch hat keine Formality). Wird per `translate.formality` im WS-Config-Protokoll durchgereicht.
+> - **Kontext-Übergabe**: der jeweils vorherige committete Satz wird als DeepL-`context` mitgeschickt (verbessert die Qualität, wird nicht mitübersetzt).
+> - **Glossar-Hook** vorbereitet via `DEEPL_GLOSSARY_ID` (v1: leer).
+> - **Sprachauswahl**: Mit aktivem DeepL bietet `/api/translate/languages` eine kuratierte Liste (u. a. EN/ES/DE/PL/FR — alle Richtungen frei kombinierbar, eine oder zwei Zielsprachen).
+> - **Setup**: `.env` anlegen (siehe [.env.example](.env.example)) und nur `ELEVENLABS_API_KEY` + `DEEPL_API_KEY` eintragen; empfohlene Engine für Live-Sprechen ist **ElevenLabs Scribe v2 Realtime** (Browser- oder Server-Mode). Start: `uvicorn app.main:app --port 8000`.
+
+---
+
 ## Table of Contents
 
 - [Features](#features)
@@ -53,7 +65,7 @@ Built with [FastAPI](https://fastapi.tiangolo.com/), powered by four interchange
   | **Deepgram Nova-3** | Server | Required | High accuracy, low latency |
   | **ElevenLabs Scribe v2** | Server or Browser | Required | Server-side proxy or direct browser connection |
 
-- **Real-time translation** into two configurable target languages (powered by [googletrans](https://github.com/ssut/py-googletrans))
+- **Real-time translation** into two configurable target languages -- via the official [DeepL API](https://www.deepl.com/pro-api) when `DEEPL_API_KEY` is set (with formality control and sentence context), falling back to [googletrans](https://github.com/ssut/py-googletrans) otherwise
 - **Interim + final results** -- partial transcriptions shown live before the utterance is committed
 - **Interim throttling** -- server-side message versioning skips stale translations to prevent queue buildup
 - **Password-protected** -- cookie-based auth with HMAC-signed tokens (can be disabled for VPN/proxy setups)
@@ -82,8 +94,9 @@ Built with [FastAPI](https://fastapi.tiangolo.com/), powered by four interchange
                                  │
                     ┌────────────┼────────────┐
                     ▼            ▼            ▼
-              Deepgram API  ElevenLabs API  googletrans
-              (Nova-3 STT)  (Scribe v2)    (translation)
+              Deepgram API  ElevenLabs API  DeepL API
+              (Nova-3 STT)  (Scribe v2)    (translation;
+                                            googletrans fallback)
 ```
 
 **Web Speech** -- The browser's built-in `SpeechRecognition` API handles STT locally; recognized text is sent to `/ws` for translation only.
@@ -92,7 +105,7 @@ Built with [FastAPI](https://fastapi.tiangolo.com/), powered by four interchange
 
 **Nemotron (local)** -- The browser runs NVIDIA's [Nemotron-3.5-ASR streaming](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b) model (a cache-aware FastConformer encoder + RNN-T decoder, 40 language-locales) fully on-device via onnxruntime-web. The encoder runs on **WebGPU** (strongly recommended — real-time) with a CPU/WASM fallback that works but isn't real-time for this 600 M model. Because it streams, it shows a growing live transcription and commits a final on each pause; audio never leaves the client, only text goes to `/ws`. The model assets (~1.2 GB fp16) are generated, not committed — build them once with `scripts/prepare_nemotron_onnx.py` (see [app/static/nemotron/README.md](app/static/nemotron/README.md)).
 
-**Deepgram** -- Raw PCM audio streams from the browser to `/ws/deepgram`. The server proxies it to the Deepgram SDK for transcription, then translates via googletrans.
+**Deepgram** -- Raw PCM audio streams from the browser to `/ws/deepgram`. The server proxies it to the Deepgram SDK for transcription, then translates (DeepL, or googletrans fallback).
 
 **ElevenLabs (server mode)** -- Same pattern as Deepgram but using the ElevenLabs Scribe v2 Realtime WebSocket API at `/ws/elevenlabs`.
 
@@ -105,6 +118,7 @@ Built with [FastAPI](https://fastapi.tiangolo.com/), powered by four interchange
 - Python 3.10+ (uses `X | None` union syntax)
 - A microphone-capable browser (Chrome or Edge recommended for Web Speech)
 - API keys for Deepgram and/or ElevenLabs (optional -- Web Speech works without any)
+- A DeepL API key for production-quality translation with formality control (optional -- googletrans fallback without it)
 
 ### Local Development
 
@@ -123,7 +137,9 @@ pip install -r requirements.txt
 
 # Configure environment
 cp .env.example .env
-# Edit .env — at minimum set APP_PASSWORD
+# Edit .env — at minimum set APP_PASSWORD.
+# For the live speech translator flow also set ELEVENLABS_API_KEY (STT)
+# and DEEPL_API_KEY (translation).
 
 # Start the server
 uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -186,8 +202,11 @@ Copy [`.env.example`](.env.example) and edit to taste. All variables have sensib
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
+| `DEEPL_API_KEY` | For DeepL | -- | API key from [deepl.com](https://www.deepl.com/your-account/keys). When set, all translation goes through DeepL; when empty, googletrans is used. |
+| `DEEPL_API_URL` | No | Auto | DeepL endpoint override. Auto-detected from the key: `api-free.deepl.com` for `:fx` (free) keys, `api.deepl.com` otherwise. |
+| `DEEPL_GLOSSARY_ID` | No | -- | Optional DeepL glossary id for custom terminology (glossary hook; v1 empty). |
 | `MAX_TEXT_LENGTH` | No | `5000` | Maximum accepted input text length per WebSocket message. |
-| `TRANSLATE_TIMEOUT_SECONDS` | No | `10` | Timeout for a single googletrans call (seconds). |
+| `TRANSLATE_TIMEOUT_SECONDS` | No | `10` | Timeout for a single translate call (seconds). |
 
 ### Engine Selection
 
@@ -221,7 +240,8 @@ Disabled engines appear in the UI dropdown but are grayed out and cannot be sele
 | `GET` | `/health` | No | Health check. Returns `{"status": "ok"}`. |
 | `GET` | `/deepgram` | -- | Legacy redirect to `/`. |
 | `POST` | `/login` | No | Form login (`password`, `next`). Sets auth cookie. Rate-limited. |
-| `GET` | `/api/translate/languages` | Yes\* | Lists available translation languages. |
+| `GET` | `/api/translate/languages` | Yes\* | Lists available translation languages (curated DeepL list when `DEEPL_API_KEY` is set). |
+| `POST` | `/api/translate` | Yes\* | Translates one text segment via DeepL (`{"text", "source_lang", "target_lang", "formality"?, "context"?}`); falls back to googletrans without a key. |
 | `POST` | `/api/elevenlabs/token` | Yes\* | Creates single-use ElevenLabs Scribe token. Accepts optional `{"api_key": "..."}` body. |
 
 \*Auth is required only when `AUTH_ENABLED=true` (default).
@@ -241,8 +261,9 @@ All WebSocket endpoints require a valid auth cookie and matching origin header (
 **Client -> Server** (`/ws`):
 
 ```jsonc
-// Session config (optional, sent once at start)
-{"type": "config", "translate": {"src": "cs", "dests": ["en", "ru"]}}
+// Session config (optional, sent once at start).
+// "formality" is DeepL-only: "more" (formal), "less" (informal) or null (default).
+{"type": "config", "translate": {"src": "cs", "dests": ["en", "ru"], "formality": "more"}}
 
 // Text messages
 {"type": "interim", "text": "Ahoj svete", "src": "cs", "dests": ["en", "ru"]}
@@ -278,7 +299,7 @@ The first message can optionally be a JSON config:
 {
   "type": "config",
   "deepgram": {"language": "cs", "interim_results": true, "punctuate": true},
-  "translate": {"src": "cs", "dests": ["en", "ru"]},
+  "translate": {"src": "cs", "dests": ["en", "ru"], "formality": null},
   "translate_interim": false
 }
 ```
@@ -415,7 +436,7 @@ These items would improve the project but are not blocking. They make great firs
   - `MAX_TEXT_LENGTH` enforcement
   - Auth token expiry
 - [ ] **Extract duplicated AudioWorklet PCM processor** code into a shared JavaScript constant -- the same processor is currently inlined in three places (Deepgram, ElevenLabs server mode, ElevenLabs browser mode)
-- [ ] **Consider `google-cloud-translate` or `deepl` for production translation** -- the current `googletrans` library uses an unofficial API that can be slow (1--3 s per call) and occasionally breaks; a paid translation API would be more reliable for production deployments
+- [x] **DeepL for production translation** -- done: set `DEEPL_API_KEY` and all translation goes through the official DeepL API (with formality + context); `googletrans` remains only as the keyless fallback
 
 ## Contributing
 

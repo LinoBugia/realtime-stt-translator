@@ -209,6 +209,44 @@ if "elevenlabs" in ENABLED_ENGINES and not ELEVENLABS_API_KEY:
 MAX_TEXT_LENGTH = _env_int("MAX_TEXT_LENGTH", 5000)
 TRANSLATE_TIMEOUT_SECONDS = _env_float("TRANSLATE_TIMEOUT_SECONDS", 10.0)
 
+# --- DeepL (preferred translation provider when configured) ---
+# When DEEPL_API_KEY is set, all translation goes through DeepL; otherwise the
+# legacy googletrans path is used. Keys stay server-side only.
+DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "")
+_deepl_url_env = os.getenv("DEEPL_API_URL", "").strip()
+if _deepl_url_env:
+    DEEPL_API_URL = _deepl_url_env
+elif DEEPL_API_KEY and not DEEPL_API_KEY.endswith(":fx"):
+    # Free-tier keys end with ":fx" and must use api-free.deepl.com.
+    DEEPL_API_URL = "https://api.deepl.com/v2/translate"
+else:
+    DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
+
+# Glossary hook (v1: empty). Set a DeepL glossary id to apply custom terminology.
+DEEPL_GLOSSARY_ID = os.getenv("DEEPL_GLOSSARY_ID", "")
+
+# DeepL wants uppercase codes; targets EN/PT additionally need a regional variant.
+_DEEPL_TARGET_OVERRIDES = {"en": "EN-US", "pt": "PT-PT", "zh": "ZH-HANS"}
+
+# Targets DeepL supports formality for (English has no formality distinction).
+_DEEPL_FORMALITY_TARGETS = {"de", "es", "fr", "it", "ja", "nl", "pl", "pt", "ru"}
+
+# Curated language list offered in the UI when DeepL is active
+# (v1 languages EN/ES/DE/PL/FR plus the legacy defaults, all DeepL-supported).
+_DEEPL_LANGUAGES = [
+    {"code": "cs", "name": "Czech"},
+    {"code": "nl", "name": "Dutch"},
+    {"code": "en", "name": "English"},
+    {"code": "fr", "name": "French"},
+    {"code": "de", "name": "German"},
+    {"code": "it", "name": "Italian"},
+    {"code": "pl", "name": "Polish"},
+    {"code": "pt", "name": "Portuguese"},
+    {"code": "ru", "name": "Russian"},
+    {"code": "es", "name": "Spanish"},
+    {"code": "uk", "name": "Ukrainian"},
+]
+
 # --- Simple in-memory rate limiter for /login ---
 _LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 _LOGIN_MAX_ATTEMPTS = 10
@@ -320,9 +358,91 @@ def _render_login(request: Request, *, next_path: str, invalid_pwd: bool) -> HTM
     )
 
 
-async def _translate(translator: Translator, text: str, *, src: str, dest: str):
+def _normalize_formality(value: object) -> str | None:
+    """Normalize a client-provided formality value to "more"/"less" (or None)."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    if v in {"more", "formal", "prefer_more"}:
+        return "more"
+    if v in {"less", "informal", "prefer_less"}:
+        return "less"
+    return None
+
+
+def _deepl_source_lang(code: str) -> str:
+    # DeepL source codes have no regional variants ("en-US" -> "EN").
+    return code.strip().split("-")[0].upper()
+
+
+def _deepl_target_lang(code: str) -> str:
+    c = code.strip().lower()
+    return _DEEPL_TARGET_OVERRIDES.get(c, c.upper())
+
+
+class _TranslationResult:
+    """Minimal googletrans-compatible result (``.text``) for the DeepL path."""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+async def _deepl_translate(
+    text: str,
+    *,
+    src: str,
+    dest: str,
+    formality: str | None = None,
+    context: str | None = None,
+) -> str:
+    """Translate one text via the DeepL v2 API. Returns the translated string."""
+    import httpx
+
+    payload: dict = {"text": [text], "target_lang": _deepl_target_lang(dest)}
+    src_norm = _deepl_source_lang(src) if src and src.strip().lower() != "auto" else ""
+    if src_norm:
+        payload["source_lang"] = src_norm
+    # prefer_more/prefer_less keeps DeepL from erroring on unsupported targets.
+    if formality and dest.strip().split("-")[0].lower() in _DEEPL_FORMALITY_TARGETS:
+        payload["formality"] = f"prefer_{formality}"
+    if context:
+        payload["context"] = context
+    if DEEPL_GLOSSARY_ID and src_norm:
+        payload["glossary_id"] = DEEPL_GLOSSARY_ID
+
+    async with httpx.AsyncClient(timeout=TRANSLATE_TIMEOUT_SECONDS) as client:
+        resp = await client.post(
+            DEEPL_API_URL,
+            headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    translations = data.get("translations") or []
+    if translations and isinstance(translations[0], dict):
+        return str(translations[0].get("text", ""))
+    return ""
+
+
+async def _translate(
+    translator: Translator,
+    text: str,
+    *,
+    src: str,
+    dest: str,
+    formality: str | None = None,
+    context: str | None = None,
+):
+    # Modular translate layer: DeepL when configured, googletrans otherwise.
+    if DEEPL_API_KEY:
+        return _TranslationResult(
+            await _deepl_translate(text, src=src, dest=dest, formality=formality, context=context)
+        )
     # googletrans has had both sync and async implementations across versions.
     # Run sync translate in a worker thread to avoid blocking the event loop.
+    # (googletrans ignores formality/context — DeepL-only features.)
     if inspect.iscoroutinefunction(translator.translate):
         return await asyncio.wait_for(
             translator.translate(text, src=src, dest=dest),
@@ -472,16 +592,80 @@ def _require_http_auth(request: Request) -> None:
 
 @app.get("/api/translate/languages")
 async def api_translate_languages(request: Request):
-    """Return available translation languages (googletrans)."""
+    """Return available translation languages (DeepL when configured, else googletrans)."""
     _require_http_auth(request)
+    if DEEPL_API_KEY:
+        return {"languages": list(_DEEPL_LANGUAGES), "provider": "deepl"}
     try:
         from googletrans import LANGUAGES  # type: ignore
 
         languages = [{"code": code, "name": name} for code, name in LANGUAGES.items()]
         languages.sort(key=lambda x: (x["name"], x["code"]))
-        return {"languages": languages}
+        return {"languages": languages, "provider": "googletrans"}
     except Exception:
         return {"languages": []}
+
+
+@app.post("/api/translate")
+async def api_translate(request: Request):
+    """Translate a single text segment (proxy to DeepL; keys stay server-side).
+
+    Body: ``{"text", "source_lang", "target_lang", "formality"?, "context"?}``.
+    Falls back to googletrans when no DEEPL_API_KEY is configured.
+    """
+    _require_http_auth(request)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid_body")
+
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="missing_text")
+    text = text.strip()
+    if len(text) > MAX_TEXT_LENGTH:
+        raise HTTPException(status_code=400, detail="text_too_long")
+
+    target_lang = _normalize_lang_code(body.get("target_lang"))
+    if not target_lang:
+        raise HTTPException(status_code=400, detail="missing_target_lang")
+    source_lang = _normalize_lang_code(body.get("source_lang")) or ""
+
+    formality = _normalize_formality(body.get("formality"))
+    context = body.get("context") if isinstance(body.get("context"), str) else None
+
+    if DEEPL_API_KEY:
+        import httpx
+
+        try:
+            translated = await _deepl_translate(
+                text,
+                src=source_lang,
+                dest=target_lang,
+                formality=formality,
+                context=context,
+            )
+            return {"translation": translated, "provider": "deepl"}
+        except httpx.HTTPStatusError as e:
+            logging.error("DeepL API error: %s", e)
+            raise HTTPException(
+                status_code=502, detail=f"deepl_error_{e.response.status_code}"
+            )
+        except Exception as e:
+            logging.error("DeepL translation failed: %s", e)
+            raise HTTPException(status_code=502, detail="translation_failed")
+
+    try:
+        result = await _translate(
+            Translator(), text, src=source_lang or "auto", dest=target_lang
+        )
+        return {"translation": result.text if result else "", "provider": "googletrans"}
+    except Exception as e:
+        logging.error("googletrans translation failed: %s", e)
+        raise HTTPException(status_code=502, detail="translation_failed")
 
 
 ELEVENLABS_TOKEN_URL = "https://api.elevenlabs.io/v1/single-use-token/realtime_scribe"
@@ -605,6 +789,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
     session_src_lang = "cs"
     session_dest_langs: list[str] = ["en", "ru"]
+    session_formality: str | None = None
+    # Previous committed sentence — sent to DeepL as `context` (improves quality,
+    # is not itself translated).
+    last_final_text = ""
 
     # --- Interim dedup: version counter so we can skip stale interims ---
     # Each incoming message increments the counter. Before starting a slow
@@ -626,6 +814,7 @@ async def websocket_endpoint(websocket: WebSocket):
             msg_type: str | None = None
             src_lang = session_src_lang
             dest_langs: list[str] = list(session_dest_langs)
+            formality = session_formality
             text = raw
             client_id: int | None = None
             client_sent_ms: float | None = None
@@ -642,6 +831,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             dests_norm = _normalize_translate_dests(tr_cfg.get("dests"))
                             if dests_norm:
                                 session_dest_langs = dests_norm
+
+                            if "formality" in tr_cfg:
+                                session_formality = _normalize_formality(
+                                    tr_cfg.get("formality")
+                                )
                         continue
 
                     if parsed.get("type") == "ping":
@@ -668,6 +862,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         dests_norm = _normalize_translate_dests(parsed.get("dests"))
                         if dests_norm:
                             dest_langs = dests_norm
+
+                        if "formality" in parsed:
+                            formality = _normalize_formality(parsed.get("formality"))
             except Exception:
                 # Legacy klient posílá prostý text.
                 pass
@@ -748,7 +945,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     start_t = time.perf_counter()
                     results = await asyncio.gather(
                         *[
-                            _translate(translator, text, src=src_lang, dest=dest)
+                            _translate(
+                                translator,
+                                text,
+                                src=src_lang,
+                                dest=dest,
+                                formality=formality,
+                                context=last_final_text or None,
+                            )
                             for dest in dest_langs
                         ]
                     )
@@ -794,6 +998,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         ru="",
                         error="translation_failed",
                     )
+
+            # Committed segments become the DeepL context for the next sentence.
+            if not is_interim:
+                last_final_text = text
 
             # Odešleme JSON s překladem
             await websocket.send_json(response)
@@ -855,6 +1063,8 @@ async def deepgram_websocket_endpoint(websocket: WebSocket):
     translate_src = "cs"
     translate_dests: list[str] = ["en", "ru"]
     translate_interim = False
+    translate_formality: str | None = None
+    last_final_text = ""
 
     first_audio: bytes | None = None
 
@@ -889,6 +1099,11 @@ async def deepgram_websocket_endpoint(websocket: WebSocket):
                         dests_norm = _normalize_translate_dests(tr_cfg.get("dests"))
                         if dests_norm:
                             translate_dests = dests_norm
+
+                        if "formality" in tr_cfg:
+                            translate_formality = _normalize_formality(
+                                tr_cfg.get("formality")
+                            )
 
                     if isinstance(cfg.get("translate_interim"), bool):
                         translate_interim = cfg["translate_interim"]
@@ -1062,6 +1277,7 @@ async def deepgram_websocket_endpoint(websocket: WebSocket):
             
             # Coroutine pro zpracování výsledků
             async def process_results():
+                nonlocal last_final_text
                 while True:
                     if stop_event.is_set() and result_queue.empty():
                         # Prefer to drain results until the listen thread ends, but don't hang forever.
@@ -1084,6 +1300,8 @@ async def deepgram_websocket_endpoint(websocket: WebSocket):
                                             transcript,
                                             src=translate_src,
                                             dest=dest,
+                                            formality=translate_formality,
+                                            context=last_final_text or None,
                                         )
                                         for dest in translate_dests
                                     ]
@@ -1108,6 +1326,7 @@ async def deepgram_websocket_endpoint(websocket: WebSocket):
                                     error="translation_failed",
                                     timing={"translate_ms": 0},
                                 )
+                            last_final_text = transcript
                         else:
                             if translate_interim:
                                 try:
@@ -1119,6 +1338,8 @@ async def deepgram_websocket_endpoint(websocket: WebSocket):
                                                 transcript,
                                                 src=translate_src,
                                                 dest=dest,
+                                                formality=translate_formality,
+                                                context=last_final_text or None,
                                             )
                                             for dest in translate_dests
                                         ]
@@ -1235,6 +1456,8 @@ async def elevenlabs_websocket_endpoint(websocket: WebSocket):
     translate_src = "cs"
     translate_dests: list[str] = ["en", "ru"]
     translate_interim = True
+    translate_formality: str | None = None
+    last_final_text = ""
     el_language_code = ""
     el_commit_strategy = "vad"
 
@@ -1268,6 +1491,11 @@ async def elevenlabs_websocket_endpoint(websocket: WebSocket):
                         dests_norm = _normalize_translate_dests(tr_cfg.get("dests"))
                         if dests_norm:
                             translate_dests = dests_norm
+
+                        if "formality" in tr_cfg:
+                            translate_formality = _normalize_formality(
+                                tr_cfg.get("formality")
+                            )
 
                     if isinstance(cfg.get("translate_interim"), bool):
                         translate_interim = cfg["translate_interim"]
@@ -1381,7 +1609,7 @@ async def elevenlabs_websocket_endpoint(websocket: WebSocket):
 
         async def _receive_transcripts():
             """Read transcripts from ElevenLabs and send translated results to browser."""
-            nonlocal translator
+            nonlocal translator, last_final_text
             try:
                 async for raw in el_ws:
                     if stop_event.is_set():
@@ -1402,7 +1630,14 @@ async def elevenlabs_websocket_endpoint(websocket: WebSocket):
                                 start_t = time.perf_counter()
                                 results = await asyncio.gather(
                                     *[
-                                        _translate(translator, text, src=translate_src, dest=dest)
+                                        _translate(
+                                            translator,
+                                            text,
+                                            src=translate_src,
+                                            dest=dest,
+                                            formality=translate_formality,
+                                            context=last_final_text or None,
+                                        )
                                         for dest in translate_dests
                                     ]
                                 )
@@ -1444,7 +1679,14 @@ async def elevenlabs_websocket_endpoint(websocket: WebSocket):
                             start_t = time.perf_counter()
                             results = await asyncio.gather(
                                 *[
-                                    _translate(translator, text, src=translate_src, dest=dest)
+                                    _translate(
+                                        translator,
+                                        text,
+                                        src=translate_src,
+                                        dest=dest,
+                                        formality=translate_formality,
+                                        context=last_final_text or None,
+                                    )
                                     for dest in translate_dests
                                 ]
                             )
@@ -1469,6 +1711,7 @@ async def elevenlabs_websocket_endpoint(websocket: WebSocket):
                                 error="translation_failed",
                                 timing={"translate_ms": 0},
                             )
+                        last_final_text = text
                         await websocket.send_json(response)
 
                     elif msg_type in ("input_error", "error", "auth_error",

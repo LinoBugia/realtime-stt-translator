@@ -471,6 +471,15 @@
               <select id="translateDestB"></select>
             </div>
             <div class="field">
+              <label for="translateFormality">Formality</label>
+              <select id="translateFormality">
+                <option value="default">Default</option>
+                <option value="more">Formal (Sie / usted / vous)</option>
+                <option value="less">Informal (du / tú / tu)</option>
+              </select>
+              <p class="hint">DeepL only — DE/ES/FR/PL etc.; English has no formality</p>
+            </div>
+            <div class="field">
               <span class="checkbox">
                 <input id="translateInterim" type="checkbox" />
                 <label for="translateInterim">Translate interim text</label>
@@ -680,6 +689,7 @@
     const translateSrcInput = document.getElementById('translateSrc');
     const translateDestASelect = document.getElementById('translateDestA');
     const translateDestBSelect = document.getElementById('translateDestB');
+    const translateFormalitySelect = document.getElementById('translateFormality');
     const continuousCheckbox = document.getElementById('continuous');
     const interimResultsCheckbox = document.getElementById('interimResults');
     const maxAlternativesInput = document.getElementById('maxAlternatives');
@@ -754,6 +764,7 @@
     let translateSrc = 'cs';
     let translateDestA = 'en';
     let translateDestB = '';
+    let translateFormality = 'default'; // 'default' | 'more' | 'less' (DeepL formality)
 
     // Engine
     let currentEngine = 'webspeech';
@@ -1315,6 +1326,15 @@
       return dests;
     }
 
+    // Shared `translate` object for `{type: 'config'}` messages on all WS endpoints.
+    function getTranslateConfig() {
+      return {
+        src: translateSrc,
+        dests: getTranslateDests(),
+        formality: translateFormality === 'default' ? null : translateFormality,
+      };
+    }
+
     function applyTopbarCompact(enabled) {
       topbarCompactEnabled = Boolean(enabled);
       if (document.body) {
@@ -1660,6 +1680,9 @@
       translateSrcInput.value = translateSrc;
       translateDestASelect.value = translateDestA;
       translateDestBSelect.value = translateDestB;
+      if (translateFormalitySelect) {
+        translateFormalitySelect.value = translateFormality;
+      }
       continuousCheckbox.checked = recognitionContinuous;
       interimResultsCheckbox.checked = recognitionInterimResults;
       maxAlternativesInput.value = String(recognitionMaxAlternatives);
@@ -1724,6 +1747,9 @@
         if (typeof parsed.translateDestB === 'string') {
           translateDestB = parsed.translateDestB;
         }
+        if (typeof parsed.translateFormality === 'string' && ['default', 'more', 'less'].includes(parsed.translateFormality)) {
+          translateFormality = parsed.translateFormality;
+        }
         if (typeof parsed.translateInterimEnabled === 'boolean') {
           translateInterimEnabled = parsed.translateInterimEnabled;
         }
@@ -1785,6 +1811,7 @@
             translateSrc,
             translateDestA,
             translateDestB,
+            translateFormality,
             translateInterimEnabled,
             interimSendIntervalMs,
             deepgramModel,
@@ -1833,6 +1860,10 @@
       translateDestB = String(translateDestBSelect.value || '').trim();
       if (translateDestB && translateDestA === translateDestB) {
         translateDestB = '';
+      }
+      if (translateFormalitySelect) {
+        const f = translateFormalitySelect.value;
+        translateFormality = ['default', 'more', 'less'].includes(f) ? f : 'default';
       }
 
       recognitionContinuous = Boolean(continuousCheckbox.checked);
@@ -2402,12 +2433,12 @@
         _wsReconnectCount = 0;
         _startWsKeepAlive();
         try {
-          const dests = getTranslateDests();
-          dbg('ws:/ws send', { type: 'config', translate: { src: translateSrc, dests } });
+          const translateCfg = getTranslateConfig();
+          dbg('ws:/ws send', { type: 'config', translate: translateCfg });
           socket.send(
             JSON.stringify({
               type: 'config',
-              translate: { src: translateSrc, dests },
+              translate: translateCfg,
             })
           );
         } catch (_e) {
@@ -2754,7 +2785,7 @@
 
         // Send session config before audio frames.
         try {
-          dbg('ws:/ws/deepgram send', {
+          const dgConfig = {
             type: 'config',
             deepgram: {
               model: 'nova-3',
@@ -2762,22 +2793,11 @@
               interim_results: Boolean(deepgramInterimResults),
               punctuate: Boolean(deepgramPunctuate),
             },
-            translate: { src: translateSrc, dests: getTranslateDests() },
+            translate: getTranslateConfig(),
             translate_interim: Boolean(translateInterimEnabled),
-          });
-          socket.send(
-            JSON.stringify({
-              type: 'config',
-              deepgram: {
-                model: 'nova-3',
-                language: deepgramLanguage,
-                interim_results: Boolean(deepgramInterimResults),
-                punctuate: Boolean(deepgramPunctuate),
-              },
-              translate: { src: translateSrc, dests: getTranslateDests() },
-              translate_interim: Boolean(translateInterimEnabled),
-            })
-          );
+          };
+          dbg('ws:/ws/deepgram send', dgConfig);
+          socket.send(JSON.stringify(dgConfig));
         } catch (_e) {
           // no-op
         }
@@ -3312,7 +3332,7 @@ registerProcessor('int16-pcm-processor-el-browser', Int16PCMProcessor);
               language_code: elevenlabsLanguage || '',
               commit_strategy: elevenlabsCommitStrategy,
             },
-            translate: { src: translateSrc, dests: getTranslateDests() },
+            translate: getTranslateConfig(),
             translate_interim: Boolean(translateInterimEnabled),
           };
           dbg('ws:/ws/elevenlabs send', config);

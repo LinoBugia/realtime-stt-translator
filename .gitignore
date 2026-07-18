@@ -17,6 +17,9 @@ scripts/sample_16k.wav
 # Credentials / secrets
 credentials/*.json
 
+# Claude Code local settings (personal permission rules)
+.claude/settings.local.json
+
 # Další nepotřebné soubory
 __pycache__/
 *.pyc
