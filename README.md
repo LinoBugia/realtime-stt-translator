@@ -12,15 +12,15 @@ Built with [FastAPI](https://fastapi.tiangolo.com/), powered by four interchange
 
 ---
 
-> ### Änderungen (2026-07-18): DeepL-Integration (Live Speech Translator Auftrag von Lino Bugia)
->
-> - **DeepL ist jetzt der bevorzugte Übersetzer**: Sobald `DEEPL_API_KEY` in `.env` gesetzt ist, laufen alle Übersetzungen (alle Engines, `/ws`, `/ws/deepgram`, `/ws/elevenlabs`) über die DeepL-API statt googletrans. Ohne Key bleibt googletrans als Fallback aktiv.
-> - **Neuer Endpoint `POST /api/translate`**: serverseitiger DeepL-Proxy (`{text, source_lang, target_lang, formality?, context?}`) — API-Keys bleiben ausschließlich im Backend.
-> - **Formality-Toggle** in den Settings (Default / Formal / Informal), wirksam für DE/ES/FR/PL/... u. a. (Englisch hat keine Formality). Wird per `translate.formality` im WS-Config-Protokoll durchgereicht.
-> - **Kontext-Übergabe**: der jeweils vorherige committete Satz wird als DeepL-`context` mitgeschickt (verbessert die Qualität, wird nicht mitübersetzt).
-> - **Glossar-Hook** vorbereitet via `DEEPL_GLOSSARY_ID` (v1: leer).
-> - **Sprachauswahl**: Mit aktivem DeepL bietet `/api/translate/languages` eine kuratierte Liste (u. a. EN/ES/DE/PL/FR — alle Richtungen frei kombinierbar, eine oder zwei Zielsprachen).
-> - **Setup**: `.env` anlegen (siehe [.env.example](.env.example)) und nur `ELEVENLABS_API_KEY` + `DEEPL_API_KEY` eintragen; empfohlene Engine für Live-Sprechen ist **ElevenLabs Scribe v2 Realtime** (Browser- oder Server-Mode). Start: `uvicorn app.main:app --port 8000`.
+### Changes (2026-07-18): DeepL Integration (Live Speech Translator commissioned by Lino Bugia)
+
+- **DeepL is now the preferred translator**: Once `DEEPL_API_KEY` is set in `.env`, all translations (all engines, `/ws`, `/ws/deepgram`, `/ws/elevenlabs`) use the DeepL API instead of googletrans. Without the key, googletrans remains active as a fallback.
+- **New `POST /api/translate` endpoint**: Server-side DeepL proxy (`{text, source_lang, target_lang, formality?, context?}`); API keys remain exclusively in the backend.
+- **Formality toggle** in the settings (Default / Formal / Informal), supported for DE/ES/FR/PL/... and other languages (English does not support formality). The setting is passed via `translate.formality` in the WS configuration protocol.
+- **Context transfer**: The previous committed sentence is sent as DeepL `context` to improve translation quality; it is not translated.
+- **Glossary hook** prepared via `DEEPL_GLOSSARY_ID` (empty in v1).
+- **Language selection**: When DeepL is active, `/api/translate/languages` provides a curated list, including EN/ES/DE/PL/FR. All language combinations are supported, with one or two target languages.
+- **Setup**: Create a `.env` file (see [.env.example](.env.example)) and add only `ELEVENLABS_API_KEY` and `DEEPL_API_KEY`. The recommended engine for live speech is **ElevenLabs Scribe v2 Realtime** (browser or server mode). Start with: `uvicorn app.main:app --port 8000`.
 
 ---
 
